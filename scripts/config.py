@@ -21,7 +21,7 @@ class AppConfig:
     GAMES = [
         GameConfig(
             name="Warhammer 40k 10th Edition",
-            base_url="https://warhammer.ru/",
+            base_url="https://wahapedia.ru/",
             context_path="wh40k10ed",
             folder_name="wh40k",
             files=[

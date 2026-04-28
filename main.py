@@ -19,10 +19,10 @@ def run_sync():
         processor.process_files()
         print(f">>> COMPLETED: {game.name}")
 
-    if AppConfig.TEMP_DIR.exists():
-        print(f"\n>>> REMOVING: {AppConfig.TEMP_DIR}")
-        shutil.rmtree(AppConfig.TEMP_DIR)
-        print(f"    [OK] {AppConfig.TEMP_DIR}")
+    # if AppConfig.TEMP_DIR.exists():
+    #     print(f"\n>>> REMOVING: {AppConfig.TEMP_DIR}")
+    #     shutil.rmtree(AppConfig.TEMP_DIR)
+    #     print(f"    [OK] {AppConfig.TEMP_DIR}")
 
     print_header("Completed Data Conversion".upper())
 
