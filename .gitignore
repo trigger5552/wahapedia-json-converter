@@ -220,3 +220,8 @@ __marimo__/
 data/*
 temp/*
 .vscode/*
+
+*.duckdb
+*.duckdb.wal
+*.zip
+*.sql
