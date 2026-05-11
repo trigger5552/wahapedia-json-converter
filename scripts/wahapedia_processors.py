@@ -1,4 +1,9 @@
 import csv
+import html
+import io
+import re
+import unicodedata
+from html.parser import HTMLParser
 from typing import Any, cast
 from datetime import datetime
 import pandas as pd
@@ -6,6 +11,154 @@ import json
 from pathlib import Path
 from scripts import GameConfig
 from scripts.constants import IdPrefix, AbilityType
+
+
+_PUNCT_TRANSLATION = str.maketrans({
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201a": "'",
+    "\u201b": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u201e": '"',
+    "\u201f": '"',
+    "\u2013": "-",
+    "\u2014": "-",
+    "\u2212": "-",
+    "\u00a0": " ",
+    "\u2026": "...",
+    "\u2022": "*",
+    "\u00b7": "-",
+    "\u00d7": "x",
+    "\u00f7": "/",
+})
+
+
+class _HTMLToPlainText(HTMLParser):
+    """Collect visible text; treat <br> as newlines (pipe chars in text are untouched)."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() == "br":
+            self._parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        self._parts.append(data)
+
+    def plain_text(self) -> str:
+        return "".join(self._parts)
+
+
+def _to_ascii_plaintext(s: str) -> str:
+    """Fold to 7-bit ASCII: compatibility punctuation, strip accents, drop remaining non-ASCII."""
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return s.encode("ascii", "ignore").decode("ascii")
+
+
+def clean_wahapedia_text(value: Any) -> str:
+    """Strip Wahapedia HTML to ASCII plaintext (no curly quotes or other Unicode punctuation)."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    if not value:
+        return value
+
+    s = html.unescape(value)
+    # Normalize line breaks from tags before feeding the parser (handles odd casing / spacing).
+    s = re.sub(r"<br\s*/?>", "\n", s, flags=re.IGNORECASE)
+    parser = _HTMLToPlainText()
+    try:
+        parser.feed(s)
+        parser.close()
+    except Exception:
+        parser = _HTMLToPlainText()
+        s_fallback = re.sub(r"<[^>]+>", "", s)
+        parser.feed(html.unescape(s_fallback))
+        parser.close()
+    text = parser.plain_text()
+
+    text = unicodedata.normalize("NFKC", text).translate(_PUNCT_TRANSLATION)
+    text = _to_ascii_plaintext(text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _scrub_dataframe_cells(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    out = df.copy()
+    for col in out.columns:
+        out[col] = out[col].map(clean_wahapedia_text)
+    return out
+
+
+def _infer_expected_pipe_count(lines: list[str]) -> int:
+    """
+    Expected number of '|' delimiters per complete data row.
+
+    Wahapedia pipe exports use a trailing '|' on every line, including the header, so
+    the raw header and body normally share the same delimiter count. If you strip the
+    trailing delimiter from the header only (e.g. when loading into DuckDB), body rows
+    still have one more '|' than that shortened header—we treat counts in {header, header+1}
+    as valid shape hints.
+
+    Only lines that end with '|' and fall in that set are used, so short tail fragments
+    of a split row are ignored.
+    """
+    header_delims = lines[0].count("|")
+    allowed = {header_delims, header_delims + 1}
+    candidates: list[int] = []
+    for line in lines[1:]:
+        if not line.rstrip().endswith("|"):
+            continue
+        n = line.count("|")
+        if n in allowed:
+            candidates.append(n)
+    if candidates:
+        return max(candidates)
+    return header_delims
+
+
+def repair_wahapedia_pipe_csv(raw: str) -> str:
+    """
+    Join physical lines that belong to one logical pipe-delimited row.
+
+    Wahapedia sometimes inserts a stray newline inside a field (e.g. long Stratagem
+    descriptions). Exports use a trailing '|' on every line; complete logical rows end
+    with '|' and match the file's usual delimiter count (see `_infer_expected_pipe_count`).
+    """
+    lines = raw.splitlines()
+    if len(lines) < 2:
+        return raw
+
+    expected = _infer_expected_pipe_count(lines)
+    out_lines: list[str] = [lines[0]]
+    i = 1
+    while i < len(lines):
+        buf = lines[i]
+        while i + 1 < len(lines):
+            if buf.count("|") > expected:
+                break
+            if buf.rstrip().endswith("|") and buf.count("|") >= expected:
+                break
+            i += 1
+            buf += lines[i]
+        out_lines.append(buf)
+        i += 1
+
+    trailing_nl = raw.endswith("\n") or raw.endswith("\r\n")
+    fixed = "\n".join(out_lines)
+    if trailing_nl and not fixed.endswith("\n"):
+        fixed += "\n"
+    return fixed
 
 
 class Wahapedia40kProcessor:
@@ -24,7 +177,7 @@ class Wahapedia40kProcessor:
                     return json.load(f)
             except Exception as e:
                 print(f"    [ERROR] Manifest Load Failed: {e}")
-        print(f"    [OK] Created New Manifest")
+        print("    [OK] Created New Manifest")
         return {"wahapedia_version": "0000-00-00 00:00:00", "last_sync_run": None}
 
     def save_manifest(self):
@@ -41,7 +194,7 @@ class Wahapedia40kProcessor:
                 reader = csv.reader(f, delimiter='|')
                 next(reader)
                 row = next(reader)
-                print(f"    [OK] Last_update.csv loaded")
+                print("    [OK] Last_update.csv loaded")
                 return row[0].strip()
         return None
 
@@ -51,17 +204,16 @@ class Wahapedia40kProcessor:
             print(f"    [ERROR] {filename} not found.")
             return pd.DataFrame()
         try:
+            raw = path.read_text(encoding="utf-8")
+            raw = repair_wahapedia_pipe_csv(raw)
             # noinspection PyArgumentList
             df = pd.read_csv(
-                path,
+                io.StringIO(raw),
                 sep='|',
                 encoding="utf-8",
-                quoting=csv.QUOTE_MINIMAL,
-                on_bad_lines='warn',
-                engine='python',
-                dtype=str,
-                keep_default_na=False
+                dtype=str
             )
+            df = _scrub_dataframe_cells(df)
             print(f"        [OK] {filename} loaded.")
             return cast(pd.DataFrame, df)
         except Exception as e:
@@ -69,7 +221,7 @@ class Wahapedia40kProcessor:
             return pd.DataFrame()
 
     def _process_factions(self):
-        print(f"\n    BUILDING factions.json")
+        print("\n    BUILDING factions.json")
         try:
             faction_df = self._load_file("Factions.csv")
             if faction_df.empty:
@@ -129,8 +281,10 @@ class Wahapedia40kProcessor:
             if processed_detachment_df.empty:
                 grouped_detachments_df = pd.Series(dtype=object)
             else:
-                grouped_detachments_df = processed_detachment_df.groupby('faction_id').apply(
-                    lambda x: x.drop(columns=['faction_id']).to_dict('records')
+                grouped_detachments_df = (
+                    processed_detachment_df
+                    .groupby('faction_id')
+                    .apply(lambda df: df.to_dict('records'))
                 )
 
             processed_factions_df = pd.DataFrame()
@@ -232,7 +386,7 @@ class Wahapedia40kProcessor:
                 grouped_strats = pd.Series(dtype=object)
             else:
                 grouped_strats = stratagems_df.groupby('detachment_id').apply(
-                    lambda x: x[['name', 'type', 'cp_cost', 'turn', 'phase', 'description']].to_dict('records')
+                    lambda df: df[['name', 'type', 'cp_cost', 'turn', 'phase', 'description']].to_dict('records')
                 )
 
             if enhancements_df.empty:
@@ -243,6 +397,7 @@ class Wahapedia40kProcessor:
                 )
 
             processed_detachments_df = pd.DataFrame()
+            processed_detachments_df['faction_id'] = detachments_df['faction_id']
             processed_detachments_df['id'] = IdPrefix.DETACHMENT + detachments_df['id']
             processed_detachments_df['name'] = detachments_df['name']
             processed_detachments_df['type'] = detachments_df['type']
@@ -256,11 +411,9 @@ class Wahapedia40kProcessor:
             processed_detachments_df['enhancements'] = detachments_df['id'].map(grouped_enhancements).apply(
                 lambda x: x if isinstance(x, list) else []
             )
-
-            print(f"    [OK] Detachment List ({len(processed_detachments_df)})")
             return processed_detachments_df
         except Exception as e:
-            print(f"    [ERROR] detachments.json: {e}")
+            print(f"    [ERROR] Detachment List: {e}")
             return pd.DataFrame()
 
     def _process_core_stratagems(self):
@@ -270,7 +423,18 @@ class Wahapedia40kProcessor:
             if core_stratagems_df.empty:
                 print("    [WARNING] Stratagems.csv is missing or empty. Skipping.")
                 return
-            only_core_stratagems_df = core_stratagems_df[core_stratagems_df['detachment_id'].isna()]
+            no_detachment_mask = (
+                core_stratagems_df['detachment_id']
+                .isin(['', '0', 'nan', 'None'])
+            )
+
+            type_mask = (
+                core_stratagems_df['type']
+                .fillna('')
+                .str.contains('Core -', case=False)
+            )
+
+            only_core_stratagems_df = core_stratagems_df[no_detachment_mask & type_mask].copy()
             if only_core_stratagems_df.empty:
                 print("    [WARNING] No core stratagems found (all have detachment_id). Skipping.")
                 return
@@ -305,9 +469,9 @@ class Wahapedia40kProcessor:
     def _process_keywords(self) -> pd.DataFrame:
         print("\n    BUILDING keywords.json")
         try:
-            keywords_df = self._load_file("Datasheet_keywords.csv")
+            keywords_df = self._load_file("Datasheets_keywords.csv")
             if keywords_df is None or keywords_df.empty:
-                print("    [WARNING] Datasheet_keywords.csv is missing or empty. Skipping.")
+                print("    [WARNING] Datasheets_keywords.csv is missing or empty. Skipping.")
                 return pd.DataFrame()
 
             unique_keywords_df = keywords_df.drop_duplicates(subset=['keyword'])
@@ -359,3 +523,5 @@ class Wahapedia40kProcessor:
     def process_files(self) -> None:
         self._process_factions()
         self._process_abilities()
+        self._process_core_stratagems()
+        self._process_enhancements()

@@ -1,5 +1,4 @@
-import shutil
-from scripts import AppConfig, Downloader, Wahapedia40kProcessor
+from scripts import AppConfig, Wahapedia40kProcessor
 
 
 def print_header(header: str):
@@ -30,7 +29,7 @@ def run_sync():
     #     shutil.rmtree(AppConfig.TEMP_DIR)
     #     print(f"    [OK] {AppConfig.TEMP_DIR}")
 
-    print_header("Completed Data Conversion".upper())
+    print_header("Completed Data Conversion")
 
 if __name__ == "__main__":
     run_sync()
