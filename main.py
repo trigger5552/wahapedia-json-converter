@@ -12,16 +12,16 @@ def run_sync():
     for game in AppConfig.GAMES:
         print(f"\n>>> GAME: {game.name}")
         print(f"    Context: {game.source_url}")
-        # worker = Downloader(game, AppConfig.TEMP_DIR)
+        # worker: Downloader = Downloader(game, AppConfig.TEMP_DIR)
         # worker.download()
-        processor = Wahapedia40kProcessor(game, AppConfig.TEMP_DIR, AppConfig.DATA_DIR)
-        # remote_timestamp = processor.process_last_update()
-        # if remote_timestamp and remote_timestamp == processor.manifest["wahapedia_version"]:
-        #     print(f"    Wahapedia Version matched Manifest Wahapedia Version. Skipping update")
-        # else:
-        processor.process_files()
-            # processor.manifest["wahapedia_version"] = remote_timestamp
-            # processor.save_manifest()
+        processor: Wahapedia40kProcessor = Wahapedia40kProcessor(game, AppConfig.TEMP_DIR, AppConfig.DATA_DIR)
+        remote_timestamp: str = processor.process_last_update()
+        if remote_timestamp and remote_timestamp == processor.manifest["wahapedia_version"]:
+            print("    Wahapedia Version matched Manifest Wahapedia Version. Skipping update")
+        else:
+            processor.process_files()
+            processor.manifest["wahapedia_version"] = remote_timestamp
+            processor.save_manifest()
         print(f">>> COMPLETED: {game.name}")
 
     # if AppConfig.TEMP_DIR.exists():
