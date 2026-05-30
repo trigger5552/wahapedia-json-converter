@@ -221,7 +221,10 @@ class Wahapedia40kProcessor:
             for f in files:
                 try:
                     df: pl.DataFrame = self._load_file(filename=f"{f}.csv")
-                    self._results[f.lower()] = df.select(files_w_columns[f]).lazy()
+                    if not df.is_empty(): 
+                        self._results[f.lower()] = df.select(files_w_columns[f]).lazy()
+                    else:
+                        logger.warning("Empty Dataframe, file could not be loaded")
                 except Exception as e:
                     logger.error(f"Could not load {f}: {e}")
         except Exception as e:
@@ -232,14 +235,19 @@ class Wahapedia40kProcessor:
         abilities_df: pl.LazyFrame = self._results["abilities"]
         datasheet_abil_df: pl.LazyFrame = self._results["datasheets_abilities"]
 
-        processed_abilitiy_df = abilities_df.group_by("id").agg(pl.col("faction_id").alias("faction_ids"))
+        processed_abilitiy_df = (
+            abilities_df
+            .group_by(["id", "name", "description"])
+            .agg(pl.col("faction_id").alias("faction_ids"))
+        )
 
         non_id_abilities_df = (
             datasheet_abil_df
             .filter(pl.col("ability_id").is_null())
             .select(
                 pl.col("name"), 
-                pl.col("type"), 
+                pl.col("type"),
+                pl.col("description"), 
                 pl.col("datasheet_id")
             )
         )
@@ -248,9 +256,10 @@ class Wahapedia40kProcessor:
             .select(["name", "description", "type", "datasheet_id"])
             .group_by(["name", "description", "type"])
             .agg(pl.col("datasheet_id").alias("datasheet_ids"))
-            .with_columns(
-                (pl.int_range(111000001, 111000001 + pl.len()).cast(pl.String).alias("id"))
-            )
+            .with_columns([
+                (pl.int_range(111000001, 111000001 + pl.len()).cast(pl.String).alias("id")),
+                pl.lit([], dtype=pl.List(pl.String)).alias("faction_ids")
+            ])
         )
 
         id_abilities_df = (
@@ -266,10 +275,16 @@ class Wahapedia40kProcessor:
         master_ability_df = pl.concat([
             processed_abilitiy_df
             .join(ability_types_df, left_on="id", right_on="ability_id", how="inner"),
-            gen_id_grouped_df.select(["id", "name", "description", "type"])
+            gen_id_grouped_df
+            .select(["id", "name", "description", "faction_ids", "type"])
         ]).collect()
 
-        records = master_ability_df.to_dicts()
+        records = (
+            master_ability_df
+            .select(["id", "name", "description", "type", "faction_ids"])
+            .unique(subset=["id"])
+            .to_dicts()
+        )
         self._save_json(json_entries=records, filename="abilities.json")
         logger.info("Saved abilities.json with {} rows", len(records))
         
