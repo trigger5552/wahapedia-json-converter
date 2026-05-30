@@ -1,4 +1,4 @@
-from scripts import AppConfig, Wahapedia40kProcessor
+from scripts import AppConfig, Wahapedia40kProcessor, Downloader
 from loguru import logger
 
 @logger.catch
